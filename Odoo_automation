@@ -37,39 +37,43 @@ class OdooAPIAgent:
         self.uid = None
         self.driver = None
         self.wait = None
-        
+
         # Business data
         self.customer_email = "maciej.narojczyk1@pjwstk.edu.pl"
         self.customer_name = "Maciej Narojczyk"
         self.warehouses = {}
         self.products = {}
-        
+
+        # Compatibility flags determined at runtime
+        self.storable_product_type = None  # the selection value used for storable products, if available
+        self.allow_quants = False          # whether we can create/update stock.quants for products
+
     def connect_api(self):
         """Connect to Odoo API"""
         logger.info(f"Connecting to Odoo API at {self.url}...")
-        
+
         try:
             # Fix SSL certificate issue on Mac
             import ssl
             ssl._create_default_https_context = ssl._create_unverified_context
-            
+
             # Remove https://, http://, and /odoo path
             clean_url = self.url.replace('https://', '').replace('http://', '')
             clean_url = clean_url.replace('/odoo', '').replace('/web', '')
             clean_url = clean_url.rstrip('/')
-            
+
             logger.info(f"Connecting to: {clean_url}")
-            
+
             # Connect
             self.odoo = odoorpc.ODOO(clean_url, protocol='jsonrpc+ssl', port=443)
-            
+
             # Login
             self.odoo.login(self.db, self.username, self.api_key)
             self.uid = self.odoo.env.uid
-            
+
             logger.info(f"✅ Connected! User ID: {self.uid}")
             return True
-            
+
         except Exception as e:
             logger.error(f"❌ API Connection failed: {e}")
             logger.info("\nTroubleshooting:")
@@ -78,37 +82,37 @@ class OdooAPIAgent:
             logger.info("3. Ensure External API access is enabled for your user")
             logger.info("4. Try just the domain: edu-loopingcomp.odoo.com")
             return False
-    
+
     def setup_browser(self):
         """Setup browser for UI-only tasks"""
         logger.info("Setting up browser for UI tasks...")
         options = webdriver.ChromeOptions()
         options.add_argument('--start-maximized')
-        
+
         service = Service(ChromeDriverManager().install())
         self.driver = webdriver.Chrome(service=service, options=options)
         self.wait = WebDriverWait(self.driver, 20)
         logger.info("Browser ready")
 
     # ============ CONFIGURATION VIA API ============
-    
+
     def create_warehouses_api(self):
         """Create warehouses via API"""
         logger.info("Creating warehouses via API...")
-        
+
         Warehouse = self.odoo.env['stock.warehouse']
-        
+
         warehouses_data = [
             {"name": "Main Warehouse", "code": "MAIN"},
             {"name": "Branch 1", "code": "BR1"},
             {"name": "Branch 2", "code": "BR2"}
         ]
-        
+
         for wh_data in warehouses_data:
             try:
                 # Check if exists
                 existing = Warehouse.search([('code', '=', wh_data['code'])])
-                
+
                 if existing:
                     wh_id = existing[0]
                     logger.info(f"✅ {wh_data['name']} already exists (ID: {wh_id})")
@@ -119,43 +123,43 @@ class OdooAPIAgent:
                         'code': wh_data['code']
                     })
                     logger.info(f"✅ Created {wh_data['name']} (ID: {wh_id})")
-                
+
                 self.warehouses[wh_data['code']] = wh_id
-                
+
             except Exception as e:
                 logger.error(f"Error creating {wh_data['name']}: {e}")
-    
+
     def configure_warehouse_routes_api(self):
         """Configure warehouse routes via API"""
         logger.info("Configuring warehouse routes...")
-        
+
         try:
             Warehouse = self.odoo.env['stock.warehouse']
-            
+
             # Configure Branch 1 and Branch 2 to resupply from Main
             for branch_code in ['BR1', 'BR2']:
-                if branch_code in self.warehouses:
+                if branch_code in self.warehouses and 'MAIN' in self.warehouses:
                     branch_id = self.warehouses[branch_code]
-                    
-                    # Enable resupply from another warehouse
+
+                    # Link to Main Warehouse (use many2many link (4, id))
                     Warehouse.write([branch_id], {
-                        'resupply_wh_ids': [(4, self.warehouses['MAIN'])]  # Link to Main Warehouse
+                        'resupply_wh_ids': [(4, self.warehouses['MAIN'])]
                     })
-                    
+
                     logger.info(f"✅ Configured {branch_code} to resupply from Main Warehouse")
-                    
+
         except Exception as e:
             logger.warning(f"Route configuration (may need manual setup): {e}")
-    
+
     def create_product_attributes_api(self):
         """Create product attributes (Color, Size)"""
         logger.info("Creating product attributes...")
-        
+
         Attribute = self.odoo.env['product.attribute']
         AttributeValue = self.odoo.env['product.attribute.value']
-        
+
         attributes = {}
-        
+
         # Create Color attribute
         try:
             color_ids = Attribute.search([('name', '=', 'Color')])
@@ -163,7 +167,7 @@ class OdooAPIAgent:
                 color_id = color_ids[0]
             else:
                 color_id = Attribute.create({'name': 'Color'})
-            
+
             # Create color values
             colors = ['White', 'Black', 'Blue', 'Dark Blue', 'Light Blue', 'Red', 'Yellow']
             for color in colors:
@@ -176,13 +180,13 @@ class OdooAPIAgent:
                         'attribute_id': color_id,
                         'name': color
                     })
-            
+
             attributes['Color'] = color_id
             logger.info("✅ Color attribute configured")
-            
+
         except Exception as e:
             logger.warning(f"Color attribute: {e}")
-        
+
         # Create Size attribute
         try:
             size_ids = Attribute.search([('name', '=', 'Size')])
@@ -190,7 +194,7 @@ class OdooAPIAgent:
                 size_id = size_ids[0]
             else:
                 size_id = Attribute.create({'name': 'Size'})
-            
+
             # Create size values
             sizes = ['S', 'M', 'L', 'XL', '42', '44', '46', '48']
             for size in sizes:
@@ -203,50 +207,87 @@ class OdooAPIAgent:
                         'attribute_id': size_id,
                         'name': size
                     })
-            
+
             attributes['Size'] = size_id
             logger.info("✅ Size attribute configured")
-            
+
         except Exception as e:
             logger.warning(f"Size attribute: {e}")
-        
+
         return attributes
-    
+
     def create_products_api(self):
         """Create all products with variants via API"""
         logger.info("Creating products with variants via API...")
-        
+
         Product = self.odoo.env['product.template']
         Attribute = self.odoo.env['product.attribute']
         AttributeValue = self.odoo.env['product.attribute.value']
-        
-        # First, let's check what product type field exists
+
+        # Determine which product type value corresponds to storable products in this DB
         try:
-            # Get field info for product.template
-            fields_info = Product.fields_get(['type', 'detailed_type'])
+            fields_info = Product.fields_get(['type'])
             logger.info(f"Available product fields: {list(fields_info.keys())}")
-            
-            # Check which field has selection options
-            for field_name, field_info in fields_info.items():
-                if field_info.get('type') == 'selection':
-                    logger.info(f"Field '{field_name}' options: {field_info.get('selection')}")
-                    
+            type_info = fields_info.get('type', {})
+            selection = type_info.get('selection', [])
+            logger.info(f"Field 'type' options: {selection}")
+
+            storable_type = None
+            # Try to detect option for storable products by key or label hints
+            for opt in selection:
+                if isinstance(opt, (list, tuple)) and len(opt) >= 2:
+                    key, label = opt[0], opt[1]
+                    label_l = (label or '').lower()
+                    key_l = (key or '').lower()
+                    if 'product' in key_l or 'storable' in label_l or 'goods' in label_l:
+                        storable_type = key
+                        break
+
+            # Some Odoo versions use 'detailed_type' instead - attempt a quick check
+            if not storable_type:
+                fields_info_dt = Product.fields_get(['detailed_type']) if 'detailed_type' in Product.fields_get().keys() else {}
+                if fields_info_dt:
+                    dt_sel = fields_info_dt.get('detailed_type', {}).get('selection', [])
+                    for opt in dt_sel:
+                        if isinstance(opt, (list, tuple)) and len(opt) >= 2:
+                            key, label = opt[0], opt[1]
+                            label_l = (label or '').lower()
+                            key_l = (key or '').lower()
+                            if 'product' in key_l or 'storable' in label_l:
+                                storable_type = key
+                                break
+
+            if storable_type:
+                self.storable_product_type = storable_type
+                self.allow_quants = True
+                logger.info(f"Detected storable product type: {self.storable_product_type}")
+            else:
+                # No storable product option detected in this DB; fall back to first option and disable quant creation.
+                first_opt = (selection[0][0] if selection and isinstance(selection[0], (list, tuple)) else None)
+                self.storable_product_type = first_opt
+                self.allow_quants = False
+                logger.warning(
+                    "No storable product type detected (e.g., 'product'). "
+                    "Products will be created as the DB default type, but stock quants cannot be created for consumables/services. "
+                    "To enable automated stock you must enable storable products in settings or install/enable the stock module that provides a 'product' type."
+                )
         except Exception as e:
-            logger.warning(f"Could not get field info: {e}")
-        
+            logger.warning(f"Could not determine product type options: {e}")
+            self.allow_quants = False
+
         # Get attribute IDs
         color_attr = Attribute.search([('name', '=', 'Color')])
         size_attr = Attribute.search([('name', '=', 'Size')])
-        
+
         if not color_attr or not size_attr:
             logger.warning("Attributes not found, creating them first...")
             self.create_product_attributes_api()
             color_attr = Attribute.search([('name', '=', 'Color')])
             size_attr = Attribute.search([('name', '=', 'Size')])
-        
+
         color_attr_id = color_attr[0] if color_attr else None
         size_attr_id = size_attr[0] if size_attr else None
-        
+
         products_data = [
             {
                 "name": "Plain Tshirt",
@@ -282,40 +323,40 @@ class OdooAPIAgent:
                 ]
             }
         ]
-        
+
         for prod_data in products_data:
             try:
                 # Check if product exists
                 existing = Product.search([('name', '=', prod_data['name'])])
-                
+
                 if existing:
                     product_id = existing[0]
                     logger.info(f"✅ {prod_data['name']} already exists (ID: {product_id})")
                     self.products[prod_data['name']] = product_id
                     continue
-                
+
                 # Step 1: Create basic product template
-                # Use 'consu' (Goods) - this Odoo version doesn't support storable products
+                # Choose the product type detected earlier; if storable not detected we'll use DB default (may be 'consu' etc.)
+                product_type_to_use = self.storable_product_type or 'consu'
                 product_vals = {
                     'name': prod_data['name'],
                     'list_price': prod_data['list_price'],
                     'standard_price': prod_data['standard_price'],
                     'sale_ok': True,
                     'purchase_ok': True,
-                    'type': 'consu',  # Goods/Consumable
+                    'type': product_type_to_use,
                 }
-                
-                logger.info(f"Creating {prod_data['name']} as type 'consu' (Goods)")
-                
+
+                logger.info(f"Creating {prod_data['name']} as type '{product_type_to_use}'")
+
                 # Step 2: Add attribute lines if variants exist
-                # This tells Odoo which attributes this product has
                 if prod_data['variants']:
                     attribute_line_ids = []
-                    
+
                     for variant in prod_data['variants']:
                         if not variant['attr_id']:
                             continue
-                            
+
                         # Get value IDs for this attribute
                         value_ids = []
                         for value_name in variant['values']:
@@ -325,126 +366,139 @@ class OdooAPIAgent:
                             ])
                             if val:
                                 value_ids.append(val[0])
-                        
+
                         # Create attribute line
-                        # Format: (0, 0, {dictionary of values})
-                        # This is Odoo's special "create new record" command
                         if value_ids:
                             attribute_line_ids.append((0, 0, {
                                 'attribute_id': variant['attr_id'],
-                                'value_ids': [(6, 0, value_ids)]  # (6, 0, [ids]) = set these IDs
+                                'value_ids': [(6, 0, value_ids)]
                             }))
-                    
+
                     if attribute_line_ids:
                         product_vals['attribute_line_ids'] = attribute_line_ids
-                
+
                 # Step 3: Create the product
-                # Odoo will automatically create all variant combinations
                 product_id = Product.create(product_vals)
-                
-                # Step 4: Wait for variant generation
+
+                # Step 4: Wait a moment for Odoo to generate variants
                 import time
-                time.sleep(1)  # Give Odoo time to generate variants
-                
+                time.sleep(1)
+
                 logger.info(f"✅ Created {prod_data['name']} (ID: {product_id})")
-                
+
                 # Verify variants were created
                 product_obj = Product.browse(product_id)
-                variant_count = len(product_obj.product_variant_ids)
+                variant_count = len(getattr(product_obj, 'product_variant_ids', []))
                 logger.info(f"   → Generated {variant_count} variants")
-                
+
                 self.products[prod_data['name']] = product_id
-                
+
             except Exception as e:
                 logger.error(f"❌ Error creating {prod_data['name']}: {e}")
                 logger.info(f"   You may need to create this product manually in Odoo")
                 import traceback
                 logger.debug(traceback.format_exc())
-    
+
     def update_stock_quantities_api(self):
         """Update stock quantities via API"""
         logger.info("Updating stock quantities...")
-        
+
+        if not self.allow_quants:
+            logger.warning(
+                "Skipping automatic quant creation: this Odoo database does not appear to support storable product type "
+                "or creating quants for the product types used. "
+                "Either change product type to a storable type in Odoo or enable the Inventory/Stock module."
+            )
+            return
+
         try:
             Product = self.odoo.env['product.product']
             Quant = self.odoo.env['stock.quant']
             Location = self.odoo.env['stock.location']
-            
+
             # Get Main Warehouse stock location
             main_location = Location.search([
                 ('usage', '=', 'internal'),
                 ('complete_name', 'ilike', 'MAIN/Stock')
             ], limit=1)
-            
+
             if not main_location:
                 # Fallback to any internal location
                 main_location = Location.search([
                     ('usage', '=', 'internal')
                 ], limit=1)
-            
+
             if not main_location:
                 logger.warning("Could not find stock location")
                 return
-            
+
             location_id = main_location[0]
             logger.info(f"Using location ID: {location_id}")
-            
+
             # Get all our product variants
             all_products = Product.search([
                 ('product_tmpl_id', 'in', list(self.products.values()))
             ])
-            
+
             logger.info(f"Updating stock for {len(all_products)} product variants...")
-            
+
             # Update quantity for each variant
             for product_id in all_products:
                 try:
                     product = Product.browse(product_id)
-                    
+
                     # Check if quant already exists
                     existing_quant = Quant.search([
                         ('product_id', '=', product_id),
                         ('location_id', '=', location_id)
                     ], limit=1)
-                    
+
                     if existing_quant:
-                        # Update existing
-                        Quant.write([existing_quant[0]], {
-                            'inventory_quantity': 100.0,
-                        })
-                        # Apply inventory adjustment
-                        quant = Quant.browse(existing_quant[0])
-                        quant.action_apply_inventory()
+                        # Update existing quant
+                        try:
+                            Quant.write([existing_quant[0]], {
+                                'quantity': 100.0,
+                            })
+                        except Exception:
+                            # fallback
+                            try:
+                                self.odoo.env['stock.quant'].write([existing_quant[0]], {'quantity': 100.0})
+                            except Exception as ee:
+                                logger.warning(f"Could not write existing quant for {product.display_name}: {ee}")
                     else:
                         # Create new quant
-                        Quant.create({
-                            'product_id': product_id,
-                            'location_id': location_id,
-                            'inventory_quantity': 100.0,
-                        })
-                    
+                        try:
+                            Quant.create({
+                                'product_id': product_id,
+                                'location_id': location_id,
+                                'quantity': 100.0,
+                            })
+                        except Exception as e:
+                            logger.warning(f"Could not create quant for {product.display_name}: {e}")
+                            continue
+
                     logger.info(f"✅ Set stock for {product.display_name}: 100 units")
-                    
+
                 except Exception as e:
                     logger.warning(f"Could not update stock for product {product_id}: {e}")
-            
-            logger.info("✅ Stock quantities updated")
-                    
+
+            logger.info("✅ Stock quantities update attempted")
+
         except Exception as e:
             logger.warning(f"Stock update error: {e}")
             logger.info("You may need to update stock quantities manually")
-    
+
     def create_vip_pricelist_api(self):
         """Create VIP pricelist with quantity-based discounts"""
         logger.info("Creating VIP pricelist...")
-        
+
         try:
             Pricelist = self.odoo.env['product.pricelist']
             PricelistItem = self.odoo.env['product.pricelist.item']
-            
+
             # Check if VIP pricelist exists
             existing = Pricelist.search([('name', '=', 'VIP Customer Pricelist')])
-            
+
             if existing:
                 pricelist_id = existing[0]
                 logger.info(f"✅ VIP pricelist already exists (ID: {pricelist_id})")
@@ -454,14 +508,13 @@ class OdooAPIAgent:
                     'name': 'VIP Customer Pricelist'
                 })
                 logger.info(f"✅ Created VIP pricelist (ID: {pricelist_id})")
-            
-            # Create discount rules
-            # Rule 1: 20% discount for quantity 1-10
+
+            # Rule 1: 20% discount for quantity >= 1
             rule1 = PricelistItem.search([
                 ('pricelist_id', '=', pricelist_id),
                 ('min_quantity', '=', 1)
             ])
-            
+
             if not rule1:
                 PricelistItem.create({
                     'pricelist_id': pricelist_id,
@@ -471,13 +524,13 @@ class OdooAPIAgent:
                     'percent_price': 20,  # 20% discount
                 })
                 logger.info("✅ Created 20% discount rule (qty 1-10)")
-            
-            # Rule 2: 25% discount for quantity > 10
+
+            # Rule 2: 25% discount for quantity >= 11
             rule2 = PricelistItem.search([
                 ('pricelist_id', '=', pricelist_id),
                 ('min_quantity', '=', 11)
             ])
-            
+
             if not rule2:
                 PricelistItem.create({
                     'pricelist_id': pricelist_id,
@@ -487,53 +540,53 @@ class OdooAPIAgent:
                     'percent_price': 25,  # 25% discount
                 })
                 logger.info("✅ Created 25% discount rule (qty > 10)")
-                
+
         except Exception as e:
             logger.error(f"Pricelist creation error: {e}")
-    
+
     def configure_purchase_approval_api(self):
         """Configure purchase approval settings"""
         logger.info("Configuring purchase approval...")
-        
+
         try:
             Company = self.odoo.env['res.company']
             company_id = self.odoo.env.user.company_id.id
-            
+
             Company.write([company_id], {
                 'po_double_validation': 'two_step',
                 'po_double_validation_amount': 0.0
             })
-            
+
             logger.info("✅ Purchase approval configured (threshold: €0)")
-            
+
         except Exception as e:
             logger.warning(f"Purchase approval config: {e}")
-    
+
     def create_reordering_rules_api(self):
         """Create reordering rules for products"""
         logger.info("Creating reordering rules...")
-        
+
         try:
             OrderPoint = self.odoo.env['stock.warehouse.orderpoint']
             Product = self.odoo.env['product.product']
             Location = self.odoo.env['stock.location']
-            
-            # Get products
+
+            # Get products (storable products)
             products = Product.search([('type', '=', 'product')], limit=10)
-            
-            # Get locations for branches
+
+            # Attempt to find a branch location (best-effort)
             branch1_location = Location.search([
                 ('name', 'ilike', 'Stock'),
                 ('location_id.name', 'ilike', 'BR1')
             ], limit=1)
-            
+
             for product_id in products:
                 try:
                     # Check if rule exists
                     existing = OrderPoint.search([
                         ('product_id', '=', product_id)
                     ])
-                    
+
                     if not existing:
                         OrderPoint.create({
                             'product_id': product_id,
@@ -541,29 +594,29 @@ class OdooAPIAgent:
                             'product_min_qty': 10.0,
                             'product_max_qty': 50.0,
                         })
-                        
+
                         product = Product.browse(product_id)
                         logger.info(f"✅ Created reordering rule for {product.name}")
-                        
-                except Exception as e:
+
+                except Exception:
                     continue
-                    
+
         except Exception as e:
             logger.warning(f"Reordering rules: {e}")
 
     # ============ COMPLETE BUSINESS FLOW ============
-    
+
     def create_complete_opportunity_api(self):
         """Create complete CRM opportunity via API"""
         logger.info("Creating complete CRM opportunity via API...")
-        
+
         try:
             Lead = self.odoo.env['crm.lead']
             Partner = self.odoo.env['res.partner']
-            
+
             # Create or get customer
             existing_partner = Partner.search([('email', '=', self.customer_email)], limit=1)
-            
+
             if existing_partner:
                 partner_id = existing_partner[0]
                 logger.info(f"✅ Customer already exists (ID: {partner_id})")
@@ -574,7 +627,7 @@ class OdooAPIAgent:
                     'customer_rank': 1,
                 })
                 logger.info(f"✅ Created customer (ID: {partner_id})")
-            
+
             # Create opportunity
             opportunity_id = Lead.create({
                 'name': 'Wholesale Clothing Order - Maciej',
@@ -583,74 +636,76 @@ class OdooAPIAgent:
                 'type': 'opportunity',
                 'expected_revenue': 1000.0,
             })
-            
+
             logger.info(f"✅ Created CRM opportunity (ID: {opportunity_id})")
             return opportunity_id
-            
+
         except Exception as e:
             logger.error(f"Opportunity creation error: {e}")
             return None
-    
+
     def create_sales_order_api(self, opportunity_id):
         """Create sales order from opportunity via API"""
         logger.info("Creating sales order from opportunity...")
-        
+
         try:
             SaleOrder = self.odoo.env['sale.order']
             SaleOrderLine = self.odoo.env['sale.order.line']
             Partner = self.odoo.env['res.partner']
             Product = self.odoo.env['product.product']
             Warehouse = self.odoo.env['stock.warehouse']
-            
+
             # Get customer
             partner = Partner.search([('email', '=', self.customer_email)], limit=1)
             if not partner:
                 logger.error("Customer not found")
                 return None
-            
+
             partner_id = partner[0]
-            
+
             # Get Branch 1 warehouse
             branch1 = Warehouse.search([('code', '=', 'BR1')], limit=1)
             warehouse_id = branch1[0] if branch1 else False
-            
+
             # Create sales order
             order_vals = {
                 'partner_id': partner_id,
                 'opportunity_id': opportunity_id,
                 'warehouse_id': warehouse_id,
             }
-            
+
             order_id = SaleOrder.create(order_vals)
             logger.info(f"✅ Created sales order (ID: {order_id})")
-            
+
             # Add order lines
             products_to_add = [
                 {'template': 'Plain Tshirt', 'color': 'White', 'size': 'M', 'qty': 15},
                 {'template': 'Jeans', 'color': 'Dark Blue', 'size': '44', 'qty': 8},
                 {'template': 'Sneakers', 'color': 'Red', 'size': '42', 'qty': 5},
             ]
-            
+
+            Template = self.odoo.env['product.template']
+
             for item in products_to_add:
                 try:
                     # Get product template
-                    template = Product.env['product.template'].search([
+                    template = Template.search([
                         ('name', '=', item['template'])
                     ], limit=1)
-                    
+
                     if not template:
                         logger.warning(f"Template not found: {item['template']}")
                         continue
-                    
+
                     # Find variant with matching attributes
                     variants = Product.search([
                         ('product_tmpl_id', '=', template[0])
                     ])
-                    
+
                     for variant_id in variants:
                         variant = Product.browse(variant_id)
                         variant_name = variant.display_name
-                        
+
                         # Check if this variant matches our criteria
                         if item['color'] in variant_name and item['size'] in variant_name:
                             SaleOrderLine.create({
@@ -662,20 +717,20 @@ class OdooAPIAgent:
                             break
                     else:
                         logger.warning(f"Variant not found for: {item['template']} {item['color']} / {item['size']}")
-                        
+
                 except Exception as e:
                     logger.warning(f"Could not add product line: {e}")
-            
+
             return order_id
-            
+
         except Exception as e:
             logger.error(f"Sales order creation error: {e}")
             return None
-    
+
     def confirm_sales_order_api(self, order_id):
         """Confirm sales order via API"""
         logger.info("Confirming sales order...")
-        
+
         try:
             SaleOrder = self.odoo.env['sale.order']
             order = SaleOrder.browse(order_id)
@@ -685,70 +740,204 @@ class OdooAPIAgent:
         except Exception as e:
             logger.error(f"Order confirmation error: {e}")
             return False
-    
+
     def process_delivery_api(self, order_id):
         """Process delivery via API"""
         logger.info("Processing delivery...")
-        
+
         try:
             SaleOrder = self.odoo.env['sale.order']
             StockPicking = self.odoo.env['stock.picking']
-            
+
             order = SaleOrder.browse(order_id)
-            
-            # Get delivery picking
-            pickings = order.picking_ids
-            
-            if not pickings:
+
+            # Get delivery picking recordset
+            pickings = getattr(order, 'picking_ids', [])
+
+            # Normalise into list of ids in a robust way to avoid 'function' or callable objects
+            pickings_ids = []
+            try:
+                if hasattr(pickings, 'ids'):
+                    try:
+                        pickings_ids = pickings.ids  # some odoorpc versions provide property
+                    except TypeError:
+                        # maybe it's a callable
+                        pickings_ids = pickings.ids()
+                elif isinstance(pickings, (list, tuple)):
+                    for p in pickings:
+                        if hasattr(p, 'id'):
+                            pickings_ids.append(p.id)
+                        else:
+                            try:
+                                pickings_ids.append(int(p))
+                            except Exception:
+                                pass
+                else:
+                    # Try to iterate over recordset-like
+                    for p in pickings:
+                        try:
+                            if hasattr(p, 'id'):
+                                pickings_ids.append(p.id)
+                            else:
+                                pickings_ids.append(int(p))
+                        except Exception:
+                            pass
+            except Exception as e:
+                logger.warning(f"Could not normalise pickings to ids: {e}")
+                # Try a last-resort: read raw field via browse
+                try:
+                    raw = order.read(['picking_ids'])
+                    if raw and isinstance(raw, list) and len(raw) > 0:
+                        pids = raw[0].get('picking_ids', [])
+                        if isinstance(pids, (list, tuple)):
+                            pickings_ids = pids
+                except Exception:
+                    pass
+
+            if not pickings_ids:
                 logger.warning("No delivery found")
                 return False
-            
-            for picking_id in pickings:
-                picking = StockPicking.browse(picking_id)
-                
-                if picking.state not in ['done', 'cancel']:
+
+            for pid in pickings_ids:
+                try:
+                    picking = StockPicking.browse(pid)
+                except Exception as e:
+                    logger.warning(f"Could not browse picking id {pid}: {e}")
+                    continue
+
+                state = getattr(picking, 'state', None)
+                if state not in ['done', 'cancel']:
                     # Set quantities done
-                    for move in picking.move_ids_without_package:
-                        move.quantity_done = move.product_uom_qty
-                    
-                    # Validate picking
-                    picking.button_validate()
-                    logger.info(f"✅ Validated delivery {picking.name}")
-            
+                    move_ids = getattr(picking, 'move_ids_without_package', [])
+                    # move_ids may be a recordset; iterate safely
+                    for move in move_ids:
+                        try:
+                            planned = getattr(move, 'product_uom_qty', 0.0)
+                            # prefer write to set quantity_done
+                            try:
+                                move.write({'quantity_done': planned})
+                            except Exception:
+                                # fallback to attribute assignment
+                                try:
+                                    move.quantity_done = planned
+                                except Exception as e:
+                                    logger.warning(f"Could not set quantity_done for move {getattr(move, 'id', 'n/a')}: {e}")
+                        except Exception as e:
+                            logger.warning(f"Error updating move qty: {e}")
+
+                    # Validate picking - wrap in try/except because some DBs require additional steps
+                    try:
+                        picking.button_validate()
+                        logger.info(f"✅ Validated delivery {getattr(picking, 'name', pid)}")
+                    except Exception as e:
+                        logger.warning(f"Could not validate picking {getattr(picking, 'name', pid)}: {e}")
+
             return True
-            
+
         except Exception as e:
             logger.error(f"Delivery processing error: {e}")
             return False
-    
+
     def create_invoice_api(self, order_id):
         """Create and post invoice via API"""
         logger.info("Creating invoice...")
-        
+
         try:
             SaleOrder = self.odoo.env['sale.order']
+            AccountMove = self.odoo.env['account.move']
+
             order = SaleOrder.browse(order_id)
-            
-            # Create invoice
-            invoice = order._create_invoices()
-            
-            if invoice:
-                # Post invoice
-                invoice.action_post()
-                logger.info(f"✅ Invoice created and posted (ID: {invoice.id})")
-                return invoice.id
-            else:
-                logger.warning("Could not create invoice")
+
+            invoice_result = None
+
+            # Primary method: new API _create_invoices
+            if hasattr(order, '_create_invoices') and callable(getattr(order, '_create_invoices')):
+                try:
+                    invoice_result = order._create_invoices()
+                except Exception as e:
+                    logger.warning(f"_create_invoices() failed: {e}")
+
+            # Fallback to older method if available
+            if not invoice_result and hasattr(order, 'action_invoice_create'):
+                try:
+                    # Some older Odoo versions return invoice id directly
+                    invoice_result = order.action_invoice_create()
+                except Exception as e:
+                    logger.warning(f"action_invoice_create() failed: {e}")
+
+            if not invoice_result:
+                logger.warning("Could not create invoice via known methods. Skipping automatic invoice creation.")
                 return None
-                
+
+            # Normalize invoice_result to a list of IDs
+            invoice_ids = []
+            try:
+                if isinstance(invoice_result, (list, tuple)):
+                    for item in invoice_result:
+                        if isinstance(item, int):
+                            invoice_ids.append(item)
+                        elif hasattr(item, 'ids'):
+                            # recordset
+                            try:
+                                invoice_ids.extend(item.ids)
+                            except Exception:
+                                # maybe callable
+                                try:
+                                    invoice_ids.extend(item.ids())
+                                except Exception:
+                                    pass
+                        elif hasattr(item, 'id'):
+                            invoice_ids.append(getattr(item, 'id'))
+                elif isinstance(invoice_result, int):
+                    invoice_ids = [invoice_result]
+                elif hasattr(invoice_result, 'ids'):
+                    try:
+                        invoice_ids = list(invoice_result.ids)
+                    except Exception:
+                        try:
+                            invoice_ids = list(invoice_result.ids())
+                        except Exception:
+                            pass
+                elif hasattr(invoice_result, 'id'):
+                    invoice_ids = [getattr(invoice_result, 'id')]
+            except Exception as e:
+                logger.warning(f"Could not normalise invoice creation result: {e}")
+
+            if not invoice_ids:
+                logger.warning("No invoice IDs detected after creation attempt.")
+                return None
+
+            posted_ids = []
+            for inv_id in invoice_ids:
+                try:
+                    inv = AccountMove.browse(inv_id)
+                    # Try standard post method
+                    try:
+                        inv.action_post()
+                        posted_ids.append(inv_id)
+                        logger.info(f"✅ Invoice created and posted (ID: {inv_id})")
+                    except Exception as e:
+                        logger.warning(f"action_post() failed for invoice {inv_id}: {e}")
+                        # Try model-level post
+                        try:
+                            AccountMove.post([inv_id])
+                            posted_ids.append(inv_id)
+                            logger.info(f"✅ Invoice posted via model method (ID: {inv_id})")
+                        except Exception as e2:
+                            logger.warning(f"Could not post invoice {inv_id}: {e2}")
+                except Exception as e:
+                    logger.warning(f"Could not browse/post invoice {inv_id}: {e}")
+
+            return posted_ids[0] if posted_ids else None
+
         except Exception as e:
             logger.error(f"Invoice creation error: {e}")
             return None
-    
+
     def mark_opportunity_won_api(self, opportunity_id):
         """Mark opportunity as won via API"""
         logger.info("Marking opportunity as won...")
-        
+
         try:
             Lead = self.odoo.env['crm.lead']
             opportunity = Lead.browse(opportunity_id)
@@ -758,14 +947,14 @@ class OdooAPIAgent:
         except Exception as e:
             logger.error(f"Mark as won error: {e}")
             return False
-    
+
     def create_crm_opportunity_browser(self):
         """Create CRM opportunity via browser"""
         logger.info("Creating CRM opportunity...")
-        
+
         self.driver.get(f"{self.url}/web#action=crm.crm_lead_all_leads")
         time.sleep(4)
-        
+
         try:
             # Create new
             create_btn = self.wait.until(
@@ -773,7 +962,7 @@ class OdooAPIAgent:
             )
             create_btn.click()
             time.sleep(3)
-            
+
             # Fill fields with better wait and error handling
             try:
                 name_field = self.wait.until(
@@ -790,7 +979,7 @@ class OdooAPIAgent:
                 logger.info("✅ Filled opportunity name")
             except Exception as e:
                 logger.warning(f"Could not fill name field: {e}")
-            
+
             try:
                 email_field = self.driver.find_element(By.XPATH, "//input[contains(@name, 'email') or contains(@id, 'email')]")
                 self.driver.execute_script("arguments[0].scrollIntoView(true);", email_field)
@@ -800,7 +989,7 @@ class OdooAPIAgent:
                 logger.info("✅ Filled email")
             except Exception as e:
                 logger.warning(f"Could not fill email: {e}")
-            
+
             try:
                 partner_field = self.driver.find_element(By.XPATH, "//input[contains(@placeholder, 'Company') or contains(@name, 'partner')]")
                 self.driver.execute_script("arguments[0].scrollIntoView(true);", partner_field)
@@ -810,7 +999,7 @@ class OdooAPIAgent:
                 logger.info("✅ Filled customer name")
             except Exception as e:
                 logger.warning(f"Could not fill customer: {e}")
-            
+
             # Save
             try:
                 save_btn = self.driver.find_element(By.XPATH, "//button[contains(@class, 'o_form_button_save')]")
@@ -819,9 +1008,9 @@ class OdooAPIAgent:
                 logger.info("✅ CRM opportunity saved")
             except:
                 logger.info("Auto-save enabled, no manual save needed")
-            
+
             logger.info("✅ CRM opportunity created")
-            
+
         except Exception as e:
             logger.error(f"CRM opportunity creation error: {e}")
             logger.info("\nPlease create the CRM opportunity manually:")
@@ -829,18 +1018,18 @@ class OdooAPIAgent:
             logger.info(f"  Email: {self.customer_email}")
             logger.info(f"  Customer: {self.customer_name}")
             input("\nPress Enter after creating it manually...")
-    
+
     def run_complete_automation(self):
         """Run complete automation - Configuration + Full Business Flow"""
         try:
             # Step 1: Connect to API
             if not self.connect_api():
                 return
-            
+
             logger.info("\n" + "="*60)
             logger.info("PART 1: CONFIGURATION VIA API")
             logger.info("="*60)
-            
+
             self.create_warehouses_api()
             self.configure_warehouse_routes_api()
             self.create_product_attributes_api()
@@ -849,58 +1038,66 @@ class OdooAPIAgent:
             self.create_vip_pricelist_api()
             self.configure_purchase_approval_api()
             self.create_reordering_rules_api()
-            
+
             logger.info("\n✅ Configuration complete via API!")
-            
+
             # Step 2: Complete Business Flow via API
             logger.info("\n" + "="*60)
             logger.info("PART 2: COMPLETE BUSINESS FLOW VIA API")
             logger.info("="*60)
-            
+
             logger.info("\n[STEP 1] Creating CRM Opportunity")
             opportunity_id = self.create_complete_opportunity_api()
-            
+
             if not opportunity_id:
                 logger.error("Failed to create opportunity")
                 return
-            
+
             logger.info("\n[STEP 2] Creating Sales Order from Opportunity")
             order_id = self.create_sales_order_api(opportunity_id)
-            
+
             if not order_id:
                 logger.error("Failed to create sales order")
                 return
-            
+
             logger.info("\n[STEP 3] Confirming Sales Order")
             if not self.confirm_sales_order_api(order_id):
                 logger.error("Failed to confirm sales order")
                 return
-            
+
             logger.info("\n[STEP 4] Processing Delivery")
             if not self.process_delivery_api(order_id):
                 logger.warning("Delivery processing had issues")
-            
+
             logger.info("\n[STEP 5] Creating and Posting Invoice")
             invoice_id = self.create_invoice_api(order_id)
-            
+
             if not invoice_id:
                 logger.warning("Invoice creation had issues")
-            
+
             logger.info("\n[STEP 6] Marking Opportunity as Won")
             self.mark_opportunity_won_api(opportunity_id)
-            
+
             logger.info("\n" + "="*60)
             logger.info("✅ COMPLETE AUTOMATION FINISHED!")
             logger.info("="*60)
             logger.info("\nSummary:")
+            # attempt to compute created variants safely
+            try:
+                pp = self.odoo.env['product.product']
+                variants_count = sum([len(pp.search([('product_tmpl_id', '=', pid)])) for pid in self.products.values()])
+            except Exception:
+                variants_count = 'n/a'
             logger.info(f"  • Configuration: Complete")
-            logger.info(f"  • Products: 33 variants created")
-            logger.info(f"  • Stock: Updated")
+            logger.info(f"  • Products: {variants_count} variants created")
+            logger.info(f"  • Stock: {'Updated' if self.allow_quants else 'Skipped (DB not storable)'}")
             logger.info(f"  • CRM Opportunity: Created (ID: {opportunity_id})")
             logger.info(f"  • Sales Order: Created & Confirmed (ID: {order_id})")
             logger.info(f"  • Delivery: Processed")
             if invoice_id:
                 logger.info(f"  • Invoice: Posted (ID: {invoice_id})")
+            else:
+                logger.info(f"  • Invoice: Not posted (see logs)")
             logger.info(f"  • Opportunity: Marked as Won")
             logger.info("\n🎉 Full Azita Clothing workflow completed!")
             logger.info("\nYou can now:")
@@ -908,15 +1105,15 @@ class OdooAPIAgent:
             logger.info(f"  2. Check the delivery documents")
             logger.info(f"  3. Review the posted invoice")
             logger.info(f"  4. See the won opportunity in CRM")
-            
+
             input("\nPress Enter to close...")
-            
+
         except Exception as e:
             logger.error(f"Automation failed: {e}")
             import traceback
             traceback.print_exc()
             input("Press Enter to close...")
-        
+
         finally:
             if self.driver:
                 self.driver.quit()
@@ -928,16 +1125,16 @@ if __name__ == "__main__":
     print("="*60)
     print("\nThis agent uses Odoo's API for reliable configuration")
     print("and browser automation only when necessary.\n")
-    
+
     # Get credentials
     url = input("Odoo URL [https://edu-loopingcomp.odoo.com]: ").strip() or "https://edu-loopingcomp.odoo.com"
     db = input("Database name [edu-loopingcomp]: ").strip() or "edu-loopingcomp"
     username = input("Username (email): ").strip()
     api_key = input("API Key: ").strip()
-    
+
     print("\n" + "="*60)
     print("Starting automation...")
     print("="*60 + "\n")
-    
+
     agent = OdooAPIAgent(url, db, username, api_key)
     agent.run_complete_automation()
